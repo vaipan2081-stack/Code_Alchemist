@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Energy Dashboard</title>
+
+  <style>
+    :root {
+      font-family: Arial, sans-serif;
+      color: #17324d;
+      background: #f3f7fa;
+    }
+
+    * { box-sizing: border-box; }
+
+    body { margin: 0; }
+
+    header {
+      background: #12354c;
+      color: white;
+      padding: 26px 6%;
+    }
+
+    header h1 { margin: 0 0 8px; font-size: 25px; }
+    header p { margin: 0; color: #c6dce6; }
+
+    main {
+      max-width: 1200px;
+      margin: 28px auto;
+      padding: 0 20px 40px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 22px;
+      margin-bottom: 20px;
+      box-shadow: 0 3px 16px rgba(20, 50, 70, 0.06);
+    }
+
+    h2 { margin-top: 0; font-size: 19px; }
+    p { line-height: 1.5; }
+
+    .upload-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    button {
+      background: #087c75;
+      color: white;
+      border: 0;
+      border-radius: 7px;
+      padding: 11px 18px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:disabled { opacity: 0.6; cursor: wait; }
+
+    .message { margin: 14px 0 0; }
+    .error { color: #b3261e; }
+    .success { color: #06745b; }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 14px;
+    }
+
+    .metric {
+      background: #edf5f5;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .metric span { display: block; font-size: 13px; color: #526b77; }
+    .metric strong { display: block; margin-top: 7px; font-size: 20px; }
+
+    .chart-container { height: 300px; }
+
+    .table-wrap { overflow-x: auto; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 11px; text-align: left; border-bottom: 1px solid #e4ecef; }
+    th { color: #526b77; background: #f8fbfc; }
+    .alert { color: #b3261e; font-weight: bold; }
+    .hidden { display: none; }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Smart Energy Dashboard</h1>
+    <p>24-hour demand forecast and power-source decisions</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Upload hourly telemetry</h2>
+      <p>
+        Select a CSV containing exactly 24 consecutive hourly rows.
+        Each row needs a timestamp, temperature, humidity and solar irradiance.
+      </p>
+
+      <form id="upload-form" class="upload-row">
+        <input id="file" type="file" accept=".csv" required>
+        <button id="forecast-button" type="submit">Generate forecast</button>
+      </form>
+
+      <p id="message" class="message" aria-live="polite"></p>
+    </section>
+
+    <section id="results" class="hidden">
+      <div class="card">
+        <h2>Forecast overview</h2>
+        <div class="summary">
+          <div class="metric">
+            <span>Peak predicted demand</span>
+            <strong id="peak">—</strong>
+          </div>
+          <div class="metric">
+            <span>Storage-mode hours</span>
+            <strong id="storage-hours">—</strong>
+          </div>
+          <div class="metric">
+            <span>Critical-alert hours</span>
+            <strong id="alert-hours">—</strong>
+          </div>
+                    <div class="metric">
+            <span>Final simulated battery charge</span>
+            <strong id="battery-charge">—</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Predicted demand</h2>
+        <div class="chart-container">
+          <canvas id="demand-chart"></canvas>
+        </div>
+                </div>
+        <p>
+          Battery values are simulated: 2,000 kWh capacity, 80% starting
+          charge and 100 kW charging in Main Grid Mode. The displayed
+          charge is the estimate at the end of each hour.
+        </p>
+
+
+      <div class="card">
+        <h2>Hourly decisions</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Demand (kW)</th>
+                <th>Grid mode</th>
+                <th>Critical overload</th>
+                <th>Battery charge</th>
+                <th>Storage availability</th>
+              </tr>
+            </thead>
+            <tbody id="results-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const form = document.getElementById("upload-form");
+    const fileInput = document.getElementById("file");
+    const button = document.getElementById("forecast-button");
+    const message = document.getElementById("message");
+    const results = document.getElementById("results");
+    let chart;
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      const file = fileInput.files[0];
+      if (!file) return;
+
+      button.disabled = true;
+      message.className = "message";
+      message.textContent = "Generating forecast. Please wait...";
+      results.classList.add("hidden");
+
+      try {
+        const formData = new FormData();
+        formData.append("file", file);
+
+        const response = await fetch("/api/forecast", {
+          method: "POST",
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Could not generate the forecast.");
+        }
+
+        const forecast = data.forecast;
+
+        document.getElementById("peak").textContent =
+          Math.max(...forecast.map(row => row.target_demand_kw)).toFixed(2) + " kW";
+
+        document.getElementById("storage-hours").textContent =
+          forecast.filter(row => row.grid_mode === "Renewable Storage Mode").length;
+
+        document.getElementById("alert-hours").textContent =
+          forecast.filter(row => row.critical_overload).length;
+        document.getElementById("battery-charge").textContent =
+        Number(forecast[forecast.length - 1].battery_charge_pct).toFixed(2) + "%";
+
+        const body = document.getElementById("results-body");
+        body.replaceChildren();
+
+        forecast.forEach(row => {
+          const tr = document.createElement("tr");
+
+          const values = [
+            row.timestamp,
+            Number(row.target_demand_kw).toFixed(2),
+            row.grid_mode,
+            row.critical_overload ? "Critical" : "Normal",
+            Number(row.battery_charge_pct).toFixed(2) + "%",
+            row.insufficient_storage ? "Insufficient charge" : "Available"
+          ];
+        
+
+          values.forEach((value, index) => {
+            const td = document.createElement("td");
+            td.textContent = value;
+
+            if (
+             (index === 3 && row.critical_overload) ||
+             (index === 5 && row.insufficient_storage)
+             ) {
+              td.className = "alert";
+            }
+
+            tr.appendChild(td);
+          });
+
+          body.appendChild(tr);
+        });
+
+        if (chart) chart.destroy();
+
+        if (typeof Chart !== "undefined") {
+          chart = new Chart(document.getElementById("demand-chart"), {
+            type: "line",
+            data: {
+              labels: forecast.map(row => row.timestamp),
+              datasets: [{
+                label: "Predicted demand (kW)",
+                data: forecast.map(row => row.target_demand_kw),
+                borderColor: "#087c75",
+                backgroundColor: "rgba(8, 124, 117, 0.12)",
+                fill: true,
+                tension: 0.25
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                y: { title: { display: true, text: "Demand (kW)" } }
+              }
+            }
+          });
+        }
+
+        results.classList.remove("hidden");
+        message.className = "message success";
+        message.textContent = "Forecast generated successfully.";
+
+      } catch (error) {
+        message.className = "message error";
+        message.textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
